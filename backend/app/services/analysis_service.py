@@ -54,8 +54,9 @@ class AnalysisService:
             scorer = QualityScorer(df, profile_data, detected_target_column)
             quality_score_data = scorer.calculate_quality_scores()
             
-            # Step 5: Get model recommendations
-            recommender = ModelRecommender(df, profile_data, detected_problem_type, detected_target_column)
+            # Step 5: Get model recommendations, informed by actual baseline signal quality
+            signal_data = quality_score_data.get("individual_scores", {}).get("separability")
+            recommender = ModelRecommender(df, profile_data, detected_problem_type, detected_target_column, signal_data)
             model_recommendations = recommender.get_model_recommendations()
             
             # Step 6: Generate detected issues

@@ -3,11 +3,19 @@ import numpy as np
 from typing import Dict, List, Any
 
 class ModelRecommender:
-    def __init__(self, df: pd.DataFrame, profile_data: Dict[str, Any], problem_type: str, target_column: str = None):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        profile_data: Dict[str, Any],
+        problem_type: str,
+        target_column: str = None,
+        signal_data: Dict[str, Any] = None
+    ):
         self.df = df
         self.profile_data = profile_data
         self.problem_type = problem_type
         self.target_column = target_column
+        self.signal_data = signal_data  # Baseline model performance from QualityScorer
         self.rows, self.cols = df.shape
     
     def get_model_recommendations(self) -> List[Dict[str, Any]]:
@@ -460,43 +468,60 @@ class ModelRecommender:
         correlations = self.profile_data.get("correlations", {})
         high_corr_pairs = len(correlations.get("high_correlation_pairs", []))
         
-        # Signal strength (if available)
-        feature_importance = self.profile_data.get("feature_importance", {})
-        if isinstance(feature_importance, dict) and "error" not in feature_importance:
-            importance_values = list(feature_importance.values())
-            max_importance = max(importance_values) if importance_values else 0
+        # Signal strength: prefer actual baseline model performance when available,
+        # fall back to mutual information (feature_importance) as a proxy.
+        signal_quality = None
+        baseline_score = None
+        if self.signal_data:
+            signal_quality = self.signal_data.get("signal_quality")
+            baseline_score = self.signal_data.get("baseline_performance", 0)
+
+        if signal_quality is not None:
+            # Use measured model performance as ground truth for signal strength
+            weak_signal = signal_quality in ("weak", "poor", "insufficient_data", "assessment_failed")
+            strong_signal = signal_quality in ("excellent",)
         else:
-            max_importance = 0
-        
+            # Fall back to mutual information when no baseline is available
+            feature_importance = self.profile_data.get("feature_importance", {})
+            if isinstance(feature_importance, dict) and "error" not in feature_importance:
+                importance_values = list(feature_importance.values())
+                max_importance = max(importance_values) if importance_values else 0
+            else:
+                max_importance = 0
+            weak_signal = max_importance < 0.1
+            strong_signal = max_importance > 0.5
+
         return {
             # Size characteristics
             "size_category": "tiny" if rows < 100 else "small" if rows < 1000 else "medium" if rows < 10000 else "large",
             "samples_per_feature": samples_per_feature,
             "high_dimensional": cols > rows,
             "curse_of_dimensionality": cols > rows * 0.1,
-            
+
             # Data quality
             "missing_data_level": "none" if missing_pct == 0 else "low" if missing_pct < 5 else "medium" if missing_pct < 20 else "high",
             "has_missing": missing_pct > 0,
             "has_outliers": high_outlier_features > 0,
             "high_multicollinearity": high_corr_pairs > 5,
-            
+
             # Feature characteristics
             "has_categorical": categorical_count > 0,
             "categorical_ratio": categorical_count / max(1, categorical_count + numerical_count),
             "mixed_types": categorical_count > 0 and numerical_count > 0,
-            
+
             # Target characteristics (classification only)
             "is_imbalanced": is_imbalanced,
             "severe_imbalance": imbalance_ratio > 10,
-            
-            # Signal characteristics
-            "weak_signal": max_importance < 0.1,
-            "strong_signal": max_importance > 0.5,
-            
+
+            # Signal characteristics — driven by actual baseline performance, not just MI
+            "weak_signal": weak_signal,
+            "strong_signal": strong_signal,
+            "signal_quality": signal_quality,
+            "baseline_score": baseline_score,
+
             # Derived flags
             "needs_robust_model": high_outlier_features > 2 or missing_pct > 10,
-            "needs_interpretable": samples_per_feature < 20 or max_importance < 0.2,
+            "needs_interpretable": samples_per_feature < 20 or weak_signal,
             "needs_fast_model": rows > 50000,
             "preprocessing_heavy": categorical_count > 5 or missing_pct > 15
         }

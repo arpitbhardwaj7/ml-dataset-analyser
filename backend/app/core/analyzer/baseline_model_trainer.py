@@ -190,8 +190,8 @@ class BaselineModelTrainer:
                     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
                 
                 scores = cross_val_score(
-                    self.classification_model, X, y, 
-                    cv=cv, scoring='accuracy', n_jobs=1  # Single job for stability
+                    self.classification_model, X, y,
+                    cv=cv, scoring='balanced_accuracy', n_jobs=1  # Single job for stability
                 )
                 
             else:  # regression
@@ -220,18 +220,20 @@ class BaselineModelTrainer:
         """Assess signal strength based on baseline performance"""
         
         if problem_type == "classification":
-            # Classification thresholds (accuracy-based)
+            # Classification thresholds (balanced_accuracy-based).
+            # balanced_accuracy averages recall per class, so 0.5 = random on any class distribution.
+            # This avoids inflated scores on imbalanced datasets that plain accuracy would produce.
             if baseline_score >= 0.85:
                 return {
                     "quality": "excellent",
                     "strength": "very_strong",
-                    "interpretation": "Excellent predictive signal - high accuracy achieved with simple model"
+                    "interpretation": "Excellent predictive signal - high balanced accuracy achieved with simple model"
                 }
             elif baseline_score >= 0.75:
                 return {
                     "quality": "good",
                     "strength": "strong",
-                    "interpretation": "Good predictive signal - clear patterns detected"
+                    "interpretation": "Good predictive signal - clear patterns detected across all classes"
                 }
             elif baseline_score >= 0.65:
                 return {
@@ -243,13 +245,13 @@ class BaselineModelTrainer:
                 return {
                     "quality": "weak",
                     "strength": "weak",
-                    "interpretation": "Weak predictive signal - limited useful patterns"
+                    "interpretation": "Weak predictive signal - limited useful patterns above random chance"
                 }
             else:
                 return {
                     "quality": "poor",
                     "strength": "very_weak",
-                    "interpretation": "Very weak signal - features may not be predictive of target"
+                    "interpretation": "Very weak signal - model performs near random chance across classes"
                 }
                 
         else:  # regression

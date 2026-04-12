@@ -13,11 +13,11 @@ from app.core.analyzer.consistency_checker import ConsistencyChecker
 class QualityScorer:
     """
     Calculates 5 independent quality scores using deterministic heuristics:
-    1. Data Quantity (20% weight)
-    2. Data Completeness (20% weight) 
-    3. Data Consistency & Validity (20% weight)
-    4. Signal-to-Noise Ratio (25% weight)
-    5. Target Suitability (15% weight)
+    1. Dimensionality  (20% weight) — samples-per-feature ratio, curse of dimensionality
+    2. Completeness    (20% weight) — missing values, duplicate rows
+    3. Consistency     (20% weight) — type validity, outliers, multicollinearity
+    4. Separability    (25% weight) — signal-to-noise via baseline model performance
+    5. Balance         (15% weight) — target quality, class balance, leakage risk
     """
     
     def __init__(self, df: pd.DataFrame, profile_data: Dict[str, Any], target_column: Optional[str] = None):
@@ -46,30 +46,32 @@ class QualityScorer:
         signal_result = self._calculate_signal_to_noise_score()
         target_result = self._calculate_target_suitability_score()
         
-        # Calculate weighted ML readiness score
+        # Calculate weighted ML readiness score.
+        # Separability carries the most weight (0.25) because baseline model performance
+        # is the most direct signal of whether the data will train a useful model.
         weights = {
-            "data_quantity": 0.20,
-            "data_completeness": 0.20,
-            "data_consistency_validity": 0.20,
-            "signal_to_noise_ratio": 0.25,
-            "target_suitability": 0.15
+            "dimensionality": 0.20,
+            "completeness": 0.20,
+            "consistency": 0.20,
+            "separability": 0.25,
+            "balance": 0.15
         }
-        
+
         ml_readiness_score = (
-            quantity_result["score"] * weights["data_quantity"] +
-            completeness_result["score"] * weights["data_completeness"] +
-            consistency_result["score"] * weights["data_consistency_validity"] +
-            signal_result["score"] * weights["signal_to_noise_ratio"] +
-            target_result["score"] * weights["target_suitability"]
+            quantity_result["score"] * weights["dimensionality"] +
+            completeness_result["score"] * weights["completeness"] +
+            consistency_result["score"] * weights["consistency"] +
+            signal_result["score"] * weights["separability"] +
+            target_result["score"] * weights["balance"]
         )
-        
+
         return {
             "individual_scores": {
-                "data_quantity": quantity_result,
-                "data_completeness": completeness_result,
-                "data_consistency_validity": consistency_result,
-                "signal_to_noise_ratio": signal_result,
-                "target_suitability": target_result
+                "dimensionality": quantity_result,
+                "completeness": completeness_result,
+                "consistency": consistency_result,
+                "separability": signal_result,
+                "balance": target_result
             },
             "ml_readiness_score": ml_readiness_score,
             "ml_readiness_grade": self._score_to_grade(ml_readiness_score),

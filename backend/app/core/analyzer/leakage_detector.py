@@ -8,6 +8,8 @@ import numpy as np
 from typing import Dict, List, Any, Optional, Set
 import re
 from datetime import datetime
+from sklearn.feature_selection import mutual_info_classif, mutual_info_regression
+from sklearn.preprocessing import LabelEncoder
 
 class LeakageDetector:
     """
@@ -221,36 +223,66 @@ class LeakageDetector:
             # For categorical targets, check for perfect associations
             return self._check_categorical_target_leakage(df, target_column)
         
-        # Check correlations with numeric features
+        # Check Pearson and Spearman correlations with numeric features.
+        # Pearson catches linear leakage; Spearman catches monotonic transformations
+        # (e.g. a rank-encoded or log-transformed copy of the target).
         numeric_columns = df.select_dtypes(include=[np.number]).columns
         numeric_columns = [col for col in numeric_columns if col != target_column]
-        
+
         for col in numeric_columns:
             try:
-                correlation = df[col].corr(target_series)
-                
-                if pd.notna(correlation):
-                    if abs(correlation) >= 0.99:
-                        findings["perfect_correlations"].append({
-                            "column": col,
-                            "correlation": round(correlation, 4),
-                            "risk_level": "high"
-                        })
-                    elif abs(correlation) >= 0.95:
-                        findings["near_perfect_correlations"].append({
-                            "column": col,
-                            "correlation": round(correlation, 4),
-                            "risk_level": "medium"
-                        })
-            except:
+                pearson_r = df[col].corr(target_series)
+                spearman_r = df[col].corr(target_series, method='spearman')
+
+                # Determine the max absolute correlation across both methods
+                max_r = max(
+                    abs(pearson_r) if pd.notna(pearson_r) else 0,
+                    abs(spearman_r) if pd.notna(spearman_r) else 0
+                )
+                best_method = (
+                    "Pearson" if (pd.notna(pearson_r) and abs(pearson_r) >= abs(spearman_r if pd.notna(spearman_r) else 0))
+                    else "Spearman"
+                )
+                best_r = pearson_r if best_method == "Pearson" else spearman_r
+
+                if max_r >= 0.99:
+                    findings["perfect_correlations"].append({
+                        "column": col,
+                        "correlation": round(float(best_r), 4),
+                        "method": best_method,
+                        "risk_level": "high"
+                    })
+                elif max_r >= 0.95:
+                    findings["near_perfect_correlations"].append({
+                        "column": col,
+                        "correlation": round(float(best_r), 4),
+                        "method": best_method,
+                        "risk_level": "medium"
+                    })
+            except Exception:
                 continue
-        
-        # Check for suspicious unique value ratios
+
+        # Mutual information check — catches non-linear feature-target dependencies
+        # that correlation misses entirely (e.g. squared relationships, step functions).
+        mi_findings = self._check_mutual_information_leakage(df, target_column, target_series)
+        for item in mi_findings:
+            col = item["column"]
+            # Only add if not already flagged by correlation
+            already_flagged = any(
+                f["column"] == col
+                for f in findings["perfect_correlations"] + findings["near_perfect_correlations"]
+            )
+            if not already_flagged:
+                if item["risk_level"] == "high":
+                    findings["perfect_correlations"].append(item)
+                else:
+                    findings["near_perfect_correlations"].append(item)
+
+        # Check for suspicious unique value ratios (potential ID columns)
         for col in df.columns:
             if col != target_column:
                 unique_ratio = df[col].nunique() / len(df)
-                
-                # Very high uniqueness might indicate leakage (like IDs)
+
                 if unique_ratio > 0.95:
                     findings["suspicious_unique_ratios"].append({
                         "column": col,
@@ -258,7 +290,79 @@ class LeakageDetector:
                         "unique_values": df[col].nunique(),
                         "risk_level": "medium"
                     })
-        
+
+        return findings
+
+    def _check_mutual_information_leakage(
+        self,
+        df: pd.DataFrame,
+        target_column: str,
+        target_series: pd.Series
+    ) -> List[Dict[str, Any]]:
+        """
+        Detect leakage via mutual information.
+        MI catches non-linear relationships that Pearson/Spearman miss.
+        A feature with normalized MI > 0.7 explains >70% of target entropy —
+        almost certainly a proxy or direct copy of the target.
+        """
+        findings = []
+
+        try:
+            # Prepare numeric features only (MI requires numeric input)
+            numeric_cols = [
+                col for col in df.select_dtypes(include=[np.number]).columns
+                if col != target_column
+            ]
+            if not numeric_cols:
+                return findings
+
+            X = df[numeric_cols].fillna(df[numeric_cols].median())
+
+            # Determine whether target is categorical or continuous
+            is_classification = (
+                target_series.dtype == 'object' or
+                target_series.dtype.name == 'category' or
+                target_series.nunique() <= 20
+            )
+
+            if is_classification:
+                le = LabelEncoder()
+                y = le.fit_transform(target_series.astype(str).fillna('__missing__'))
+                mi_scores = mutual_info_classif(X, y, random_state=42)
+                # Normalize by log2(n_classes) — theoretical max MI for classification
+                n_classes = len(np.unique(y))
+                max_possible_mi = np.log2(max(n_classes, 2))
+            else:
+                y = target_series.fillna(target_series.median()).values
+                mi_scores = mutual_info_regression(X, y, random_state=42)
+                # Normalize by target entropy (estimated via variance)
+                target_std = float(np.std(y))
+                max_possible_mi = 0.5 * np.log(2 * np.pi * np.e * target_std ** 2) if target_std > 0 else 1.0
+                max_possible_mi = max(max_possible_mi, 1.0)
+
+            for col, mi in zip(numeric_cols, mi_scores):
+                normalized_mi = mi / max_possible_mi if max_possible_mi > 0 else 0
+
+                if normalized_mi >= 0.7:
+                    findings.append({
+                        "column": col,
+                        "mutual_information": round(float(mi), 4),
+                        "normalized_mi": round(float(normalized_mi), 3),
+                        "detection_method": "mutual_information",
+                        "risk_level": "high"
+                    })
+                elif normalized_mi >= 0.5:
+                    findings.append({
+                        "column": col,
+                        "mutual_information": round(float(mi), 4),
+                        "normalized_mi": round(float(normalized_mi), 3),
+                        "detection_method": "mutual_information",
+                        "risk_level": "medium"
+                    })
+
+        except Exception:
+            pass
+
         return findings
     
     def _check_categorical_target_leakage(

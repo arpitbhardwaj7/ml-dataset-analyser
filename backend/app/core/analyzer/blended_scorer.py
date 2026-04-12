@@ -81,12 +81,19 @@ class BlendedScorer:
     ) -> float:
         """Calculate how much weight to give LLM score vs deterministic score"""
         
-        # Base weights by confidence level
+        # Base weights by LLM confidence level.
+        # Deterministic analysis always dominates because it is grounded in real data.
+        # LLM contribution is capped at 35% even at HIGH confidence because:
+        #   (a) LLMs can hallucinate plausible-sounding but incorrect observations, and
+        #   (b) a single LLM call over a sample is inherently less reliable than
+        #       statistics computed over the full dataset.
+        # The ±15-point cap in __init__ provides a second safety net so that even a
+        # maximally-weighted LLM call cannot swing the final score by more than 15 points.
         confidence_weights = {
-            "HIGH": 0.35,    # 65% deterministic, 35% LLM  
-            "MEDIUM": 0.25,  # 75% deterministic, 25% LLM
-            "LOW": 0.15,     # 85% deterministic, 15% LLM
-            None: 0.20       # Default when no confidence provided
+            "HIGH": 0.35,    # LLM findings are well-supported — allow moderate influence
+            "MEDIUM": 0.25,  # Default uncertain case — modest influence
+            "LOW": 0.15,     # LLM confidence is poor — near-deterministic result
+            None: 0.20       # No confidence reported — conservative default
         }
         
         base_weight = confidence_weights.get(llm_confidence, 0.20)
